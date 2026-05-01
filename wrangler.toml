@@ -16,3 +16,7 @@ SUPABASE_URL = "https://btzaudxujnodtikhemar.supabase.co"
 LOGIN_REDIRECT = "https://thefixer.in/login"
 UPGRADE_REDIRECT = "https://thefixer.in/app/billing/upgrade"
 WORKER_MODE = "shadow"
+
+[observability]
+enabled = true
+head_sampling_rate = 1.0
