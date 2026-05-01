@@ -5,7 +5,13 @@ import type { WorkerEnv } from "./config";
 const COOKIE_NAME = "sb-access-token";
 
 export default {
-  async fetch(req: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> {
+  async fetch(originalReq: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> {
+    // Strip client-supplied trusted-header values BEFORE any other logic so
+    // they can never reach origin. Origin (Open WebUI) is configured with
+    // WEBUI_AUTH_TRUSTED_EMAIL_HEADER, so any spoofed X-Forwarded-Email or
+    // X-Forwarded-User from a public client would otherwise authenticate the
+    // attacker as that user. Re-set only after JWT validates.
+    const req = stripSpoofedHeaders(originalReq);
     const url = new URL(req.url);
     const cookie = parseCookie(req.headers.get("cookie") ?? "", COOKIE_NAME);
 
@@ -38,11 +44,11 @@ export default {
     }));
 
     if (env.WORKER_MODE === "shadow") {
-      return fetch(validatedClaims ? withForwardedHeaders(req, validatedClaims) : req);
+      return fetch(validatedClaims ? withTrustedHeaders(req, validatedClaims) : req);
     }
 
     if (allowed) {
-      return fetch(validatedClaims ? withForwardedHeaders(req, validatedClaims) : req);
+      return fetch(validatedClaims ? withTrustedHeaders(req, validatedClaims) : req);
     }
 
     if (reason === "no_cookie" || reason.startsWith("jwt_error")) {
@@ -63,9 +69,19 @@ function parseCookie(header: string, name: string): string | null {
   return null;
 }
 
-function withForwardedHeaders(orig: Request, claims: AccessTokenClaims): Request {
+function stripSpoofedHeaders(orig: Request): Request {
   const headers = new Headers(orig.headers);
+  // Headers#delete is case-insensitive per the Fetch spec, so this catches
+  // any case variant a client might try (x-forwarded-email, X-FORWARDED-USER, etc.)
+  headers.delete("X-Forwarded-Email");
+  headers.delete("X-Forwarded-User");
+  return new Request(orig, { headers });
+}
+
+function withTrustedHeaders(req: Request, claims: AccessTokenClaims): Request {
+  // Caller must pass a request that has already been through stripSpoofedHeaders.
+  const headers = new Headers(req.headers);
   if (claims.email) headers.set("X-Forwarded-Email", claims.email);
   if (claims.sub) headers.set("X-Forwarded-User", claims.sub);
-  return new Request(orig, { headers });
+  return new Request(req, { headers });
 }

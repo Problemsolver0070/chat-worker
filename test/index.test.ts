@@ -120,4 +120,88 @@ describe("Worker fetch handler", () => {
     expect(captured!.headers.get("X-Forwarded-Email")).toBeNull();
     expect(captured!.headers.get("X-Forwarded-User")).toBeNull();
   });
+
+  it("strips client-supplied X-Forwarded-Email when no JWT cookie (shadow mode)", async () => {
+    const env = makeEnv("shadow");
+    let captured: Request | null = null;
+    globalThis.fetch = vi.fn(async (forwarded: Request) => {
+      captured = forwarded;
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    const req = new Request("https://chat.thefixer.in/", {
+      headers: { "X-Forwarded-Email": "spoofed@example.com" },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(200);
+    expect(captured).not.toBeNull();
+    expect(captured!.headers.get("X-Forwarded-Email")).toBeNull();
+  });
+
+  it("strips client-supplied X-Forwarded-User when no JWT cookie (shadow mode)", async () => {
+    const env = makeEnv("shadow");
+    let captured: Request | null = null;
+    globalThis.fetch = vi.fn(async (forwarded: Request) => {
+      captured = forwarded;
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    const req = new Request("https://chat.thefixer.in/", {
+      headers: { "X-Forwarded-User": "spoofed-user-id" },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(200);
+    expect(captured).not.toBeNull();
+    expect(captured!.headers.get("X-Forwarded-User")).toBeNull();
+  });
+
+  it("strips client-supplied X-Forwarded-Email when JWT cookie is invalid (shadow mode)", async () => {
+    const env = makeEnv("shadow");
+    let captured: Request | null = null;
+    globalThis.fetch = vi.fn(async (forwarded: Request) => {
+      captured = forwarded;
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    const req = new Request("https://chat.thefixer.in/", {
+      headers: {
+        cookie: "sb-access-token=not.a.valid.jwt",
+        "X-Forwarded-Email": "spoofed@example.com",
+        "X-Forwarded-User": "spoofed-user",
+      },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(200);
+    expect(captured).not.toBeNull();
+    expect(captured!.headers.get("X-Forwarded-Email")).toBeNull();
+    expect(captured!.headers.get("X-Forwarded-User")).toBeNull();
+  });
+
+  it("replaces client-supplied X-Forwarded-Email with JWT claim email when JWT is valid (enforce mode)", async () => {
+    const token = await signJwt({
+      sub: "user-789",
+      email: "trusted@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const env = makeEnv("enforce", jwks);
+    let captured: Request | null = null;
+    globalThis.fetch = vi.fn(async (forwarded: Request) => {
+      captured = forwarded;
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+    const req = new Request("https://chat.thefixer.in/", {
+      headers: {
+        cookie: `sb-access-token=${token}`,
+        "X-Forwarded-Email": "spoofed@example.com",
+        "X-Forwarded-User": "spoofed-user-id",
+      },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(200);
+    expect(captured).not.toBeNull();
+    expect(captured!.headers.get("X-Forwarded-Email")).toBe("trusted@example.com");
+    expect(captured!.headers.get("X-Forwarded-User")).toBe("user-789");
+  });
 });
