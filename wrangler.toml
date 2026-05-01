@@ -1,0 +1,18 @@
+name = "chat-worker"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[routes]]
+pattern = "chat.thefixer.in/*"
+zone_name = "thefixer.in"
+
+[[kv_namespaces]]
+binding = "JWKS_CACHE"
+id = "85b6f025966944b5bb77d7a408dfae81"
+
+[vars]
+SUPABASE_URL = "https://btzaudxujnodtikhemar.supabase.co"
+LOGIN_REDIRECT = "https://thefixer.in/login"
+UPGRADE_REDIRECT = "https://thefixer.in/app/billing/upgrade"
+WORKER_MODE = "shadow"
