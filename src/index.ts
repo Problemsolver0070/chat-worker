@@ -1,5 +1,5 @@
 import { fetchJwks } from "./jwks";
-import { verifyAccessToken } from "./jwt";
+import { verifyAccessToken, type AccessTokenClaims } from "./jwt";
 import type { WorkerEnv } from "./config";
 
 const COOKIE_NAME = "sb-access-token";
@@ -11,6 +11,7 @@ export default {
 
     let allowed: boolean;
     let reason: string;
+    let validatedClaims: AccessTokenClaims | null = null;
 
     if (!cookie) {
       allowed = false;
@@ -20,6 +21,7 @@ export default {
         const jwksUrl = `${env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`;
         const jwks = await fetchJwks(jwksUrl, env.JWKS_CACHE);
         const claims = await verifyAccessToken(cookie, jwks);
+        validatedClaims = claims;
         allowed = Boolean(claims.has_active_subscription);
         reason = allowed ? "allowed" : "no_subscription";
       } catch (err) {
@@ -36,11 +38,11 @@ export default {
     }));
 
     if (env.WORKER_MODE === "shadow") {
-      return fetch(req);
+      return fetch(validatedClaims ? withForwardedHeaders(req, validatedClaims) : req);
     }
 
     if (allowed) {
-      return fetch(req);
+      return fetch(validatedClaims ? withForwardedHeaders(req, validatedClaims) : req);
     }
 
     if (reason === "no_cookie" || reason.startsWith("jwt_error")) {
@@ -59,4 +61,11 @@ function parseCookie(header: string, name: string): string | null {
     if (p.slice(0, idx) === name) return p.slice(idx + 1);
   }
   return null;
+}
+
+function withForwardedHeaders(orig: Request, claims: AccessTokenClaims): Request {
+  const headers = new Headers(orig.headers);
+  if (claims.email) headers.set("X-Forwarded-Email", claims.email);
+  if (claims.sub) headers.set("X-Forwarded-User", claims.sub);
+  return new Request(orig, { headers });
 }
