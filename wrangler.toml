@@ -15,7 +15,7 @@ id = "85b6f025966944b5bb77d7a408dfae81"
 SUPABASE_URL = "https://btzaudxujnodtikhemar.supabase.co"
 LOGIN_REDIRECT = "https://thefixer.in/login"
 UPGRADE_REDIRECT = "https://thefixer.in/app/billing/upgrade"
-WORKER_MODE = "shadow"
+WORKER_MODE = "enforce"
 
 [observability]
 enabled = true
