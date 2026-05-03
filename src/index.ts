@@ -14,6 +14,19 @@ export default {
     // attacker as that user. Re-set only after JWT validates.
     const req = stripSpoofedHeaders(originalReq);
     const url = new URL(req.url);
+
+    // Service-to-service bypass for backend admin tooling. The api at
+    // api.thefixer.in needs to call LibreChat's /api/agents endpoints
+    // (R9 agent prompt editor) using a minted LibreChat JWT. This Worker
+    // is currently configured to redirect every cookie-less request to
+    // /login, which would convert the Bearer-token traffic into a 302.
+    // We let any /api/* request flow through untouched. LibreChat itself
+    // enforces auth on those routes via the Bearer token; the Worker's
+    // role is to gate the chat UI, not the API.
+    if (url.pathname.startsWith("/api/")) {
+      return fetch(req);
+    }
+
     const cookie = parseCookie(req.headers.get("cookie") ?? "", COOKIE_NAME);
 
     let allowed: boolean;
