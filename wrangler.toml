@@ -16,6 +16,7 @@ SUPABASE_URL = "https://btzaudxujnodtikhemar.supabase.co"
 LOGIN_REDIRECT = "https://thefixer.in/login"
 UPGRADE_REDIRECT = "https://thefixer.in/app/billing/upgrade"
 WORKER_MODE = "enforce"
+API_BASE_URL = "https://api.thefixer.in"
 
 [observability]
 enabled = true
