@@ -1,5 +1,6 @@
 import { fetchJwks } from "./jwks";
 import { verifyAccessToken, type AccessTokenClaims } from "./jwt";
+import { fetchUsersMe, type UsersMeResult } from "./users";
 import type { WorkerEnv } from "./config";
 
 const COOKIE_NAME = "sb-access-token";
@@ -18,6 +19,7 @@ export default {
     let allowed: boolean;
     let reason: string;
     let validatedClaims: AccessTokenClaims | null = null;
+    let validatedJwt: string | null = null;
 
     if (!cookie) {
       allowed = false;
@@ -28,6 +30,7 @@ export default {
         const jwks = await fetchJwks(jwksUrl, env.JWKS_CACHE);
         const claims = await verifyAccessToken(cookie, jwks);
         validatedClaims = claims;
+        validatedJwt = cookie;
         allowed = Boolean(claims.has_active_subscription);
         reason = allowed ? "allowed" : "no_subscription";
       } catch (err) {
@@ -36,19 +39,42 @@ export default {
       }
     }
 
+    // Fetch name + subscription status from the backend (cached) when we
+    // have a validated JWT. The result populates x-forwarded-name and
+    // x-forwarded-subscription-status on the forwarded request and lets
+    // us deny chat access for `expired` status. Failure is graceful: we
+    // fall back to the existing email-only header set so a backend
+    // outage does not break chat for already-paying users.
+    let usersMe: UsersMeResult | null = null;
+    if (validatedClaims && validatedJwt) {
+      usersMe = await fetchUsersMe({
+        apiBaseUrl: env.API_BASE_URL,
+        jwt: validatedJwt,
+        userId: validatedClaims.sub,
+        cache: env.JWKS_CACHE,
+      });
+    }
+
     console.log(JSON.stringify({
       mode: env.WORKER_MODE,
       decision: allowed ? "allow" : "deny",
       reason,
       path: url.pathname,
+      subscription_status: usersMe?.subscription_status ?? null,
     }));
 
     if (env.WORKER_MODE === "shadow") {
-      return fetch(validatedClaims ? withTrustedHeaders(req, validatedClaims) : req);
+      return fetch(validatedClaims ? withTrustedHeaders(req, validatedClaims, usersMe) : req);
     }
 
     if (allowed) {
-      return fetch(validatedClaims ? withTrustedHeaders(req, validatedClaims) : req);
+      // Backend says the subscription is expired (PayPal sub_status flipped
+      // to CANCELLED/SUSPENDED) but the cached JWT claim still says active.
+      // Honour the fresher backend signal and redirect to upgrade.
+      if (usersMe?.subscription_status === "expired") {
+        return Response.redirect(env.UPGRADE_REDIRECT, 302);
+      }
+      return fetch(validatedClaims ? withTrustedHeaders(req, validatedClaims, usersMe) : req);
     }
 
     if (reason === "no_cookie" || reason.startsWith("jwt_error")) {
@@ -75,13 +101,23 @@ function stripSpoofedHeaders(orig: Request): Request {
   // any case variant a client might try (x-forwarded-email, X-FORWARDED-USER, etc.)
   headers.delete("X-Forwarded-Email");
   headers.delete("X-Forwarded-User");
+  headers.delete("X-Forwarded-Name");
+  headers.delete("X-Forwarded-Subscription-Status");
   return new Request(orig, { headers });
 }
 
-function withTrustedHeaders(req: Request, claims: AccessTokenClaims): Request {
+function withTrustedHeaders(
+  req: Request,
+  claims: AccessTokenClaims,
+  usersMe: UsersMeResult | null,
+): Request {
   // Caller must pass a request that has already been through stripSpoofedHeaders.
   const headers = new Headers(req.headers);
   if (claims.email) headers.set("X-Forwarded-Email", claims.email);
   if (claims.sub) headers.set("X-Forwarded-User", claims.sub);
+  if (usersMe?.name) headers.set("X-Forwarded-Name", usersMe.name);
+  if (usersMe?.subscription_status) {
+    headers.set("X-Forwarded-Subscription-Status", usersMe.subscription_status);
+  }
   return new Request(req, { headers });
 }
