@@ -42,6 +42,26 @@ describe("deriveSubscriptionStatus", () => {
     ).toBe("expired");
   });
 
+  it("returns active when only in_comp_window is true (code-redeemed paid users)", () => {
+    expect(
+      deriveSubscriptionStatus({
+        has_active_subscription: false,
+        in_trial_window: false,
+        in_demo_window: false,
+        in_comp_window: true,
+      }),
+    ).toBe("active");
+  });
+
+  it("returns active when has_active_subscription wins over in_comp_window", () => {
+    expect(
+      deriveSubscriptionStatus({
+        has_active_subscription: true,
+        in_comp_window: true,
+      }),
+    ).toBe("active");
+  });
+
   it("returns expired when all booleans are missing from the body", () => {
     expect(deriveSubscriptionStatus({})).toBe("expired");
   });
