@@ -2,67 +2,19 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { deriveSubscriptionStatus, fetchUsersMe } from "../src/users";
 
 describe("deriveSubscriptionStatus", () => {
-  it("returns active when has_active_subscription is true (highest precedence)", () => {
+  it("returns active when has_active_subscription is true", () => {
     expect(
-      deriveSubscriptionStatus({
-        has_active_subscription: true,
-        in_trial_window: true,
-        in_demo_window: true,
-      }),
+      deriveSubscriptionStatus({ has_active_subscription: true }),
     ).toBe("active");
   });
 
-  it("returns trial when only in_trial_window is true", () => {
+  it("returns expired when has_active_subscription is false", () => {
     expect(
-      deriveSubscriptionStatus({
-        has_active_subscription: false,
-        in_trial_window: true,
-        in_demo_window: false,
-      }),
-    ).toBe("trial");
-  });
-
-  it("returns demo when only in_demo_window is true", () => {
-    expect(
-      deriveSubscriptionStatus({
-        has_active_subscription: false,
-        in_trial_window: false,
-        in_demo_window: true,
-      }),
-    ).toBe("demo");
-  });
-
-  it("returns expired when none of the booleans are true", () => {
-    expect(
-      deriveSubscriptionStatus({
-        has_active_subscription: false,
-        in_trial_window: false,
-        in_demo_window: false,
-      }),
+      deriveSubscriptionStatus({ has_active_subscription: false }),
     ).toBe("expired");
   });
 
-  it("returns active when only in_comp_window is true (code-redeemed paid users)", () => {
-    expect(
-      deriveSubscriptionStatus({
-        has_active_subscription: false,
-        in_trial_window: false,
-        in_demo_window: false,
-        in_comp_window: true,
-      }),
-    ).toBe("active");
-  });
-
-  it("returns active when has_active_subscription wins over in_comp_window", () => {
-    expect(
-      deriveSubscriptionStatus({
-        has_active_subscription: true,
-        in_comp_window: true,
-      }),
-    ).toBe("active");
-  });
-
-  it("returns expired when all booleans are missing from the body", () => {
+  it("returns expired when has_active_subscription is missing from the body", () => {
     expect(deriveSubscriptionStatus({})).toBe("expired");
   });
 });
