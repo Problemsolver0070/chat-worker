@@ -211,6 +211,25 @@ export default {
           { status: 402, headers: { "content-type": "application/json" } },
         );
       }
+      // Fail-CLOSED on backend outage for model-completion paths only.
+      // If usersMe is null (cache miss + backend 5xx / network error) we
+      // cannot verify the subscription state, so we must not let paid
+      // model traffic through. Without this check, a determined attacker
+      // could DDoS /v1/users/me to stretch a stale-cancellation window
+      // indefinitely. UI paths keep fail-OPEN behavior so signed-in
+      // users do not lose chat browsing during a transient outage.
+      // Security fix F12 from Wave 2 audit.
+      if (isModelApiCall(req) && usersMe === null) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "backend_unavailable",
+              message: "Subscription state is temporarily unverifiable. Try again in a moment.",
+            },
+          }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
       const fwd = validatedClaims ? withTrustedHeaders(req, validatedClaims, usersMe) : req;
       return fetch(withEdgeSecret(fwd, env));
     }

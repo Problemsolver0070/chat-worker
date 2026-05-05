@@ -24,7 +24,15 @@ interface UsersMeResponse {
 }
 
 const CACHE_KEY_PREFIX = "users_me:";
-const DEFAULT_TTL_SECONDS = 300;
+// 60s TTL trades a small bump in backend load for a much tighter
+// cancellation-staleness window. With a 5 min TTL, a freshly cancelled,
+// refunded, or comp-expired user could keep using paid model traffic for
+// up to 5 minutes per cached entry. With 60s the worst case is one
+// minute of post-cancellation chat, and peak load on /v1/users/me is
+// bounded by (active users / 60s) requests/sec, which sits well under
+// the existing backend rate limits at production scale. Security fix
+// F12 from Wave 2 audit.
+const DEFAULT_TTL_SECONDS = 60;
 
 /**
  * Derive the public subscription_status from the backend response.

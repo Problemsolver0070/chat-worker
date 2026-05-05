@@ -478,7 +478,7 @@ describe("Name + subscription forwarding", () => {
     expect(kv.put).toHaveBeenCalledWith(
       "users_me:user-cache",
       expect.any(String),
-      expect.objectContaining({ expirationTtl: 300 }),
+      expect.objectContaining({ expirationTtl: 60 }),
     );
 
     // Second request should hit the KV cache and not re-call the backend.
@@ -724,11 +724,12 @@ describe("Model-path gate", () => {
     expect(resp.status).toBe(402);
   });
 
-  it("returns 402 when backend is down but JWT has_active_subscription is false and model path POSTed", async () => {
-    // When backend /v1/users/me returns 5xx, usersMe is null so
-    // subscription_status is unknown. The gate only fires when
-    // usersMe?.subscription_status === "expired", so a backend outage
-    // does NOT block model access (graceful degradation).
+  it("returns 503 (fail-closed) when backend /v1/users/me is 5xx and model path POSTed (F12)", async () => {
+    // Security fix F12: when backend /v1/users/me returns 5xx, usersMe is
+    // null so subscription_status is unverifiable. For model-completion
+    // paths the worker MUST fail-CLOSED with 503 so an attacker cannot
+    // DDoS the backend to extend a stale-cancellation window. UI paths
+    // keep fail-OPEN behavior (covered by a sibling test below).
     const token = await signJwt({
       sub: "user-5xx-model",
       email: "five-model@example.com",
@@ -736,7 +737,7 @@ describe("Model-path gate", () => {
     });
     const jwks = JSON.stringify({ keys: [publicJwk] });
     const { env } = makeEnv("enforce", jwks);
-    stubFetch({
+    const { captured } = stubFetch({
       usersMeStatus: 503,
       usersMeBody: null,
     });
@@ -746,8 +747,43 @@ describe("Model-path gate", () => {
     });
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    // Backend down: usersMe is null, gate does not fire, request proxies through.
+    // Backend down on a model-API path: fail-CLOSED with 503.
+    expect(resp.status).toBe(503);
+    expect(resp.headers.get("content-type")).toBe("application/json");
+    const body = await resp.json() as { error: { type: string; message: string } };
+    expect(body.error.type).toBe("backend_unavailable");
+    expect(body.error.message).toContain("temporarily unverifiable");
+    // Origin must NOT have been forwarded to (only the failed /v1/users/me
+    // call was made, no upstream LibreChat request).
+    expect(captured()).toBeNull();
+  });
+
+  it("forwards UI path unchanged when backend /v1/users/me is 5xx (fail-OPEN preserved, F12)", async () => {
+    // Security fix F12 trade-off: UI paths must keep fail-OPEN behavior
+    // so signed-in users do not lose chat browsing during a transient
+    // backend outage. Only model-completion paths fail-closed.
+    const token = await signJwt({
+      sub: "user-5xx-ui",
+      email: "five-ui@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    const { captured } = stubFetch({
+      usersMeStatus: 503,
+      usersMeBody: null,
+    });
+    const req = new Request("https://chat.thefixer.in/", {
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    // Backend down on a UI path: forward to origin, no name/status headers.
     expect(resp.status).toBe(200);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Forwarded-Email")).toBe("five-ui@example.com");
+    expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBeNull();
   });
 });
 
