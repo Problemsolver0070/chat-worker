@@ -25,7 +25,7 @@ npm run deploy       # wrangler deploy (CI does this on push to main)
 - `src/users.ts`: `/v1/users/me` fetch + KV cache (5 min) + subscription_status derivation
 - `src/config.ts`: env-derived constants
 
-`JWKS_CACHE` is a Workers KV namespace with 24h TTL on the cached JWKS document; `users_me:<sub>` keys in the same namespace cache the `/v1/users/me` lookup with a 5 minute TTL.
+`JWKS_CACHE` is a Workers KV namespace with 24h TTL on the cached JWKS document; `users_me:<sub>` keys in the same namespace cache the `/v1/users/me` lookup with a 60s TTL (reduced from 5min in F12 to shrink the post-cancellation staleness window).
 
 Per-request flow (Round 6 / T6.1):
 1. Verify Supabase JWT cookie (existing).
