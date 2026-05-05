@@ -49,11 +49,14 @@ export const MODEL_API_PATH_PREFIXES: readonly string[] = [
 
 /**
  * Regex for the LibreChat 0.8.5 agent tool-call POST path:
- *   POST /api/agents/:agentId/tools/:toolId/call
- * This drives paid model usage and must be gated. It is not a static
- * prefix (the agentId/toolId vary), so it is matched separately.
+ *   POST /api/agents/tools/:toolId/call
+ * The tools sub-router is mounted at /tools inside the agents v1 router
+ * (api/server/routes/agents/v1.js: router.use('/tools', tools)), and
+ * tools.js exposes router.post('/:toolId/call', ...). Full path therefore
+ * has only one dynamic segment (toolId), not an agentId.
+ * This drives paid model usage and must be gated.
  */
-const TOOL_CALL_PATH_REGEX = /^\/api\/agents\/[^/]+\/tools\/[^/]+\/call$/;
+const TOOL_CALL_PATH_REGEX = /^\/api\/agents\/tools\/[^/]+\/call$/;
 
 /**
  * Returns true when the request targets a model-completion endpoint.
