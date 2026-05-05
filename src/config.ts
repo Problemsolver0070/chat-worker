@@ -9,4 +9,11 @@ export interface WorkerEnv {
   // and forwards them to LibreChat as `x-forwarded-name` and
   // `x-forwarded-subscription-status`.
   API_BASE_URL: string;
+  // Shared secret injected into the `X-Edge-Secret` header on every
+  // upstream forward. The LibreChat origin (trusted-header middleware)
+  // requires this header to match its own EDGE_SECRET env when set.
+  // Provisioned via `wrangler secret put EDGE_SECRET`. Optional so
+  // shadow / pre-rollout deploys still work, but production traffic
+  // must have this set. See trustedHeaderAuth.js on the VM.
+  EDGE_SECRET?: string;
 }
