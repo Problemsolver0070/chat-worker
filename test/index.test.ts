@@ -114,15 +114,15 @@ describe("isModelApiCall helper", () => {
     expect(isModelApiCall(req)).toBe(false);
   });
 
-  it("returns true for POST to /api/agents/AGENT123/tools/TOOL456/call (tool-call)", () => {
-    const req = new Request("https://chat.thefixer.in/api/agents/AGENT123/tools/TOOL456/call", {
+  it("returns true for POST to /api/agents/tools/TOOL456/call (tool-call)", () => {
+    const req = new Request("https://chat.thefixer.in/api/agents/tools/TOOL456/call", {
       method: "POST",
     });
     expect(isModelApiCall(req)).toBe(true);
   });
 
-  it("returns false for non-call paths under /api/agents/X/tools/Y/", () => {
-    const req = new Request("https://chat.thefixer.in/api/agents/AGENT123/tools/TOOL456/list", {
+  it("returns false for non-call paths under /api/agents/tools/Y/", () => {
+    const req = new Request("https://chat.thefixer.in/api/agents/tools/TOOL456/list", {
       method: "POST",
     });
     expect(isModelApiCall(req)).toBe(false);
@@ -622,7 +622,7 @@ describe("Model-path gate", () => {
     expect(resp.status).toBe(200);
   });
 
-  it("returns 402 when expired user POSTs to tool-call /api/agents/A/tools/T/call", async () => {
+  it("returns 402 when expired user POSTs to tool-call /api/agents/tools/T/call", async () => {
     const token = await signJwt({
       sub: "user-expired-tool",
       email: "expired-tool@example.com",
@@ -634,7 +634,7 @@ describe("Model-path gate", () => {
       usersMeBody: { full_name: "Expired Tool User", has_active_subscription: false },
     });
     const req = new Request(
-      "https://chat.thefixer.in/api/agents/agentX/tools/toolY/call",
+      "https://chat.thefixer.in/api/agents/tools/toolY/call",
       { method: "POST", headers: { cookie: `sb-access-token=${token}` } },
     );
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
