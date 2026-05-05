@@ -1,3 +1,15 @@
+/**
+ * Cloudflare Workers Rate Limit binding.
+ *
+ * Declared in wrangler.toml as `[[ratelimits]]`. The Worker calls
+ * `RATE_LIMITER.limit({ key })` and gets back `{ success: boolean }`.
+ * Bindings sharing the same `namespace_id` share counters across deploys.
+ * See https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/
+ */
+export interface RateLimitBinding {
+  limit(opts: { key: string }): Promise<{ success: boolean }>;
+}
+
 export interface WorkerEnv {
   JWKS_CACHE: KVNamespace;
   SUPABASE_URL: string;
@@ -16,4 +28,9 @@ export interface WorkerEnv {
   // shadow / pre-rollout deploys still work, but production traffic
   // must have this set. See trustedHeaderAuth.js on the VM.
   EDGE_SECRET?: string;
+  // F41: edge rate limit on model-API paths. Keyed by validated JWT sub
+  // so signed-in users get a per-account quota (60 req/60s). Optional
+  // here so older test setups without the binding still type-check;
+  // production deploys always have it provisioned by wrangler.toml.
+  RATE_LIMITER?: RateLimitBinding;
 }

@@ -11,6 +11,22 @@ zone_name = "thefixer.in"
 binding = "JWKS_CACHE"
 id = "85b6f025966944b5bb77d7a408dfae81"
 
+# F41: edge rate-limit binding. Cloudflare provisions the rate-limit
+# namespace from this declaration at `wrangler deploy`; no dashboard step.
+# 60 requests per 60s per Supabase user id (validatedClaims.sub) on
+# model-API paths only. UI page loads, /api/* bypass paths, and the SSE
+# resume / regenerate / TTS / STT routes all share this single counter
+# because the Worker keys the limit by `sub` (user identity), not URL.
+# This is generous for normal chat usage but cuts off automated abuse.
+# `simple.period` must be 10 or 60 per the binding contract.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "2001"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
 [vars]
 SUPABASE_URL = "https://btzaudxujnodtikhemar.supabase.co"
 LOGIN_REDIRECT = "https://thefixer.in/login"

@@ -43,13 +43,31 @@ function makeKv(jwksValue: string): KvHandle {
   return { store, get, put, delete: del };
 }
 
+interface RateLimiterHandle {
+  limit: ReturnType<typeof vi.fn>;
+}
+
+function makeRateLimiter(allow: boolean = true): RateLimiterHandle {
+  return {
+    limit: vi.fn(async () => ({ success: allow })),
+  };
+}
+
 function makeEnv(
   mode: "shadow" | "enforce",
   jwksOverride?: string,
-  opts?: { edgeSecret?: string | undefined },
-): { env: WorkerEnv; kv: KvHandle } {
+  opts?: {
+    edgeSecret?: string | undefined;
+    rateLimiter?: RateLimiterHandle | null;
+  },
+): { env: WorkerEnv; kv: KvHandle; rateLimiter: RateLimiterHandle | null } {
   const jwksValue = jwksOverride ?? SAMPLE_JWKS;
   const kv = makeKv(jwksValue);
+  // Default: a permissive rate limiter so existing tests continue to pass.
+  // Pass `rateLimiter: null` to omit the binding entirely (mirrors a deploy
+  // before wrangler.toml provisioned it).
+  const rateLimiter =
+    opts && "rateLimiter" in opts ? opts.rateLimiter ?? null : makeRateLimiter(true);
   const env: WorkerEnv = {
     JWKS_CACHE: kv as unknown as KVNamespace,
     SUPABASE_URL: "https://example.supabase.co",
@@ -58,8 +76,11 @@ function makeEnv(
     WORKER_MODE: mode,
     API_BASE_URL: "https://api.thefixer.in",
     EDGE_SECRET: opts && "edgeSecret" in opts ? opts.edgeSecret : "test-edge-secret",
+    RATE_LIMITER: rateLimiter
+      ? (rateLimiter as unknown as WorkerEnv["RATE_LIMITER"])
+      : undefined,
   };
-  return { env, kv };
+  return { env, kv, rateLimiter };
 }
 
 /** Stub fetch so backend calls (`/v1/users/me`) and origin forwards
@@ -876,5 +897,114 @@ describe("X-Edge-Secret injection on upstream forwards", () => {
     const fwd = captured();
     expect(fwd).not.toBeNull();
     expect(fwd!.headers.get("X-Edge-Secret")).toBe("real-secret");
+  });
+});
+
+describe("Edge rate limit on model-API paths (F41)", () => {
+  it("returns 429 with Retry-After when RATE_LIMITER reports over-limit on a model POST", async () => {
+    const token = await signJwt({
+      sub: "user-rl-over",
+      email: "rl-over@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const denied = makeRateLimiter(false);
+    const { env } = makeEnv("enforce", jwks, { rateLimiter: denied });
+    stubFetch({
+      usersMeBody: { full_name: "RL Over User", has_active_subscription: true },
+    });
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(429);
+    expect(resp.headers.get("Retry-After")).toBe("60");
+    expect(resp.headers.get("content-type")).toBe("application/json");
+    const body = (await resp.json()) as { error: { type: string } };
+    expect(body.error.type).toBe("rate_limited");
+    // The limiter must have been called with the JWT sub as the key.
+    expect(denied.limit).toHaveBeenCalledWith({ key: "user-rl-over" });
+  });
+
+  it("forwards model POST through when RATE_LIMITER reports allowed", async () => {
+    const token = await signJwt({
+      sub: "user-rl-ok",
+      email: "rl-ok@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const allowed = makeRateLimiter(true);
+    const { env } = makeEnv("enforce", jwks, { rateLimiter: allowed });
+    const { captured } = stubFetch({
+      usersMeBody: { full_name: "RL OK User", has_active_subscription: true },
+    });
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(200);
+    expect(captured()).not.toBeNull();
+    expect(allowed.limit).toHaveBeenCalledWith({ key: "user-rl-ok" });
+  });
+
+  it("does NOT call RATE_LIMITER on UI page loads (only model-API paths are rate limited)", async () => {
+    const token = await signJwt({
+      sub: "user-rl-ui",
+      email: "rl-ui@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const limiter = makeRateLimiter(true);
+    const { env } = makeEnv("enforce", jwks, { rateLimiter: limiter });
+    stubFetch({
+      usersMeBody: { full_name: "RL UI User", has_active_subscription: true },
+    });
+    const req = new Request("https://chat.thefixer.in/", {
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(200);
+    expect(limiter.limit).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call RATE_LIMITER on non-model /api/* bypass paths", async () => {
+    const limiter = makeRateLimiter(true);
+    const { env } = makeEnv("enforce", undefined, { rateLimiter: limiter });
+    stubFetch({});
+    // Non-model /api/* path: the worker bypasses straight through without
+    // running the JWT path, so the limiter must not be invoked.
+    const req = new Request("https://chat.thefixer.in/api/agents", {
+      method: "POST",
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(limiter.limit).not.toHaveBeenCalled();
+  });
+
+  it("forwards model POST when RATE_LIMITER binding is unset (pre-rollout window)", async () => {
+    const token = await signJwt({
+      sub: "user-rl-unset",
+      email: "rl-unset@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    // rateLimiter: null → env.RATE_LIMITER stays undefined.
+    const { env } = makeEnv("enforce", jwks, { rateLimiter: null });
+    const { captured } = stubFetch({
+      usersMeBody: { full_name: "RL Unset User", has_active_subscription: true },
+    });
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(200);
+    expect(captured()).not.toBeNull();
   });
 });
