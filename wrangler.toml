@@ -18,6 +18,15 @@ UPGRADE_REDIRECT = "https://thefixer.in/app/billing/upgrade"
 WORKER_MODE = "enforce"
 API_BASE_URL = "https://api.thefixer.in"
 
+# EDGE_SECRET is a Workers Secret (not a [vars] entry). Injected into
+# the `X-Edge-Secret` header on every upstream forward so the LibreChat
+# origin can verify the request came from the Worker. Provision with:
+#   wrangler secret put EDGE_SECRET
+# The same value must be set as EDGE_SECRET in /opt/librechat/.env on
+# the VM. Rotate by re-running `wrangler secret put` and updating .env
+# on the VM atomically (worker first, then VM with brief STRICT off
+# window if needed).
+
 [observability]
 enabled = true
 head_sampling_rate = 1.0

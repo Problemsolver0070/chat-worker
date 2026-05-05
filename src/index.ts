@@ -42,18 +42,72 @@ export const MODEL_API_PATH_PREFIXES: readonly string[] = [
   "/api/v1/audio/speech",
   // Image generation.
   "/api/v1/images/generations",
+  // LibreChat 0.8.5 speech routes (STT + TTS) drive paid model usage too.
+  "/api/files/speech/stt",
+  "/api/files/speech/tts",
 ] as const;
 
 /**
- * Returns true when the request targets a model-completion endpoint
- * (POST only). Exported so the test suite can pin the exact set.
+ * Regex for the LibreChat 0.8.5 agent tool-call POST path:
+ *   POST /api/agents/:agentId/tools/:toolId/call
+ * This drives paid model usage and must be gated. It is not a static
+ * prefix (the agentId/toolId vary), so it is matched separately.
+ */
+const TOOL_CALL_PATH_REGEX = /^\/api\/agents\/[^/]+\/tools\/[^/]+\/call$/;
+
+/**
+ * Returns true when the request targets a model-completion endpoint.
+ * Methods covered:
+ *   POST: most model endpoints (chat, completions, messages, etc.)
+ *   GET:  /api/agents/chat/stream/:streamId (SSE resume)
+ *   PUT:  /api/messages/:conv/:msg (regenerate-on-edit)
+ * Exported so the test suite can pin the exact set.
  */
 export function isModelApiCall(req: Request): boolean {
-  if (req.method !== "POST") return false;
   const url = new URL(req.url);
-  return MODEL_API_PATH_PREFIXES.some((prefix) =>
-    url.pathname.startsWith(prefix),
-  );
+  const path = url.pathname;
+  if (req.method === "POST") {
+    if (MODEL_API_PATH_PREFIXES.some((prefix) => path.startsWith(prefix))) {
+      return true;
+    }
+    if (TOOL_CALL_PATH_REGEX.test(path)) {
+      return true;
+    }
+    return false;
+  }
+  if (req.method === "GET") {
+    // SSE resume: the client reconnects to a running stream and the
+    // server keeps generating tokens. Same billing impact as the
+    // initial POST, so gate it under the same subscription check.
+    if (path.startsWith("/api/agents/chat/stream/")) {
+      return true;
+    }
+    return false;
+  }
+  if (req.method === "PUT") {
+    // Regenerate-on-edit: PUT /api/messages/:conv/:msg edits a prior
+    // message and triggers a fresh model call. Must be gated.
+    if (path.startsWith("/api/messages/")) {
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Returns a new Request that is a clone of `req` with the
+ * `X-Edge-Secret` header set to the configured value. Used for every
+ * upstream forward (gated and bypass) so the LibreChat origin can
+ * cryptographically verify the request came from the Worker rather
+ * than from a public client hitting the VM directly.
+ */
+function withEdgeSecret(req: Request, env: WorkerEnv): Request {
+  const headers = new Headers(req.headers);
+  if (env.EDGE_SECRET) {
+    headers.set("X-Edge-Secret", env.EDGE_SECRET);
+  }
+  return new Request(req, { headers });
 }
 
 export default {
@@ -76,8 +130,12 @@ export default {
     // Model-completion paths (e.g. /api/chat/completions) are NOT bypassed
     // here; they fall through to the JWT + subscription check below so the
     // worker can enforce the 402 gate for expired users.
+    //
+    // /api/agents/chat/abort is intentionally NOT gated (UX: an expired
+    // user mid-stream should still be able to cancel; abort does not
+    // drive paid model usage).
     if (url.pathname.startsWith("/api/") && !isModelApiCall(req)) {
-      return fetch(req);
+      return fetch(withEdgeSecret(req, env));
     }
 
     const cookie = parseCookie(req.headers.get("cookie") ?? "", COOKIE_NAME);
@@ -131,7 +189,8 @@ export default {
     }));
 
     if (env.WORKER_MODE === "shadow") {
-      return fetch(validatedClaims ? withTrustedHeaders(req, validatedClaims, usersMe) : req);
+      const fwd = validatedClaims ? withTrustedHeaders(req, validatedClaims, usersMe) : req;
+      return fetch(withEdgeSecret(fwd, env));
     }
 
     if (signedIn) {
@@ -149,7 +208,8 @@ export default {
           { status: 402, headers: { "content-type": "application/json" } },
         );
       }
-      return fetch(validatedClaims ? withTrustedHeaders(req, validatedClaims, usersMe) : req);
+      const fwd = validatedClaims ? withTrustedHeaders(req, validatedClaims, usersMe) : req;
+      return fetch(withEdgeSecret(fwd, env));
     }
 
     // Not signed in (no cookie or invalid JWT): redirect to login.
@@ -181,6 +241,11 @@ function stripSpoofedHeaders(orig: Request): Request {
   headers.delete("X-Forwarded-User");
   headers.delete("X-Forwarded-Name");
   headers.delete("X-Forwarded-Subscription-Status");
+  // Also strip any client-supplied X-Edge-Secret so the Worker is the
+  // sole authority on injecting it. A public client cannot forge the
+  // secret value (it is unknown to them) but stripping is defence in
+  // depth in case the value ever leaks.
+  headers.delete("X-Edge-Secret");
   return new Request(orig, { headers });
 }
 

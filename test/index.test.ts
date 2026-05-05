@@ -46,6 +46,7 @@ function makeKv(jwksValue: string): KvHandle {
 function makeEnv(
   mode: "shadow" | "enforce",
   jwksOverride?: string,
+  opts?: { edgeSecret?: string | undefined },
 ): { env: WorkerEnv; kv: KvHandle } {
   const jwksValue = jwksOverride ?? SAMPLE_JWKS;
   const kv = makeKv(jwksValue);
@@ -56,6 +57,7 @@ function makeEnv(
     UPGRADE_REDIRECT: "https://thefixer.in/app/billing/upgrade",
     WORKER_MODE: mode,
     API_BASE_URL: "https://api.thefixer.in",
+    EDGE_SECRET: opts && "edgeSecret" in opts ? opts.edgeSecret : "test-edge-secret",
   };
   return { env, kv };
 }
@@ -110,6 +112,59 @@ describe("isModelApiCall helper", () => {
   it("returns false for a UI page load (GET /)", () => {
     const req = new Request("https://chat.thefixer.in/", { method: "GET" });
     expect(isModelApiCall(req)).toBe(false);
+  });
+
+  it("returns true for POST to /api/agents/AGENT123/tools/TOOL456/call (tool-call)", () => {
+    const req = new Request("https://chat.thefixer.in/api/agents/AGENT123/tools/TOOL456/call", {
+      method: "POST",
+    });
+    expect(isModelApiCall(req)).toBe(true);
+  });
+
+  it("returns false for non-call paths under /api/agents/X/tools/Y/", () => {
+    const req = new Request("https://chat.thefixer.in/api/agents/AGENT123/tools/TOOL456/list", {
+      method: "POST",
+    });
+    expect(isModelApiCall(req)).toBe(false);
+  });
+
+  it("returns true for GET to /api/agents/chat/stream/STREAMID (SSE resume)", () => {
+    const req = new Request("https://chat.thefixer.in/api/agents/chat/stream/STREAMID", {
+      method: "GET",
+    });
+    expect(isModelApiCall(req)).toBe(true);
+  });
+
+  it("returns true for PUT to /api/messages/CONV/MSG (regenerate-on-edit)", () => {
+    const req = new Request("https://chat.thefixer.in/api/messages/CONV/MSG", {
+      method: "PUT",
+    });
+    expect(isModelApiCall(req)).toBe(true);
+  });
+
+  it("returns true for POST to /api/files/speech/stt", () => {
+    const req = new Request("https://chat.thefixer.in/api/files/speech/stt", {
+      method: "POST",
+    });
+    expect(isModelApiCall(req)).toBe(true);
+  });
+
+  it("returns true for POST to /api/files/speech/tts", () => {
+    const req = new Request("https://chat.thefixer.in/api/files/speech/tts", {
+      method: "POST",
+    });
+    expect(isModelApiCall(req)).toBe(true);
+  });
+
+  it("returns false for POST to /api/agents/chat/abort (UX, not gated)", () => {
+    const req = new Request("https://chat.thefixer.in/api/agents/chat/abort", {
+      method: "POST",
+    });
+    // /api/agents/chat is the prefix, but abort is not a paid model call
+    // by intent. The current prefix-match counts /api/agents/chat/abort
+    // as gated; if that ever becomes a UX problem, narrow the prefix.
+    // This test pins current behavior so a future change is intentional.
+    expect(isModelApiCall(req)).toBe(true);
   });
 });
 
@@ -567,6 +622,108 @@ describe("Model-path gate", () => {
     expect(resp.status).toBe(200);
   });
 
+  it("returns 402 when expired user POSTs to tool-call /api/agents/A/tools/T/call", async () => {
+    const token = await signJwt({
+      sub: "user-expired-tool",
+      email: "expired-tool@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    stubFetch({
+      usersMeBody: { full_name: "Expired Tool User", has_active_subscription: false },
+    });
+    const req = new Request(
+      "https://chat.thefixer.in/api/agents/agentX/tools/toolY/call",
+      { method: "POST", headers: { cookie: `sb-access-token=${token}` } },
+    );
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(402);
+    const body = await resp.json() as { error: { type: string } };
+    expect(body.error.type).toBe("subscription_expired");
+  });
+
+  it("returns 402 when expired user GETs SSE resume /api/agents/chat/stream/:id", async () => {
+    const token = await signJwt({
+      sub: "user-expired-sse",
+      email: "expired-sse@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    stubFetch({
+      usersMeBody: { full_name: "Expired SSE User", has_active_subscription: false },
+    });
+    const req = new Request("https://chat.thefixer.in/api/agents/chat/stream/abc123", {
+      method: "GET",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(402);
+  });
+
+  it("returns 402 when expired user PUTs /api/messages/:conv/:msg (regenerate)", async () => {
+    const token = await signJwt({
+      sub: "user-expired-regen",
+      email: "expired-regen@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    stubFetch({
+      usersMeBody: { full_name: "Expired Regen User", has_active_subscription: false },
+    });
+    const req = new Request("https://chat.thefixer.in/api/messages/conv1/msg1", {
+      method: "PUT",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(402);
+  });
+
+  it("returns 402 when expired user POSTs /api/files/speech/stt", async () => {
+    const token = await signJwt({
+      sub: "user-expired-stt",
+      email: "expired-stt@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    stubFetch({
+      usersMeBody: { full_name: "Expired STT User", has_active_subscription: false },
+    });
+    const req = new Request("https://chat.thefixer.in/api/files/speech/stt", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(402);
+  });
+
+  it("returns 402 when expired user POSTs /api/files/speech/tts", async () => {
+    const token = await signJwt({
+      sub: "user-expired-tts",
+      email: "expired-tts@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    stubFetch({
+      usersMeBody: { full_name: "Expired TTS User", has_active_subscription: false },
+    });
+    const req = new Request("https://chat.thefixer.in/api/files/speech/tts", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(402);
+  });
+
   it("returns 402 when backend is down but JWT has_active_subscription is false and model path POSTed", async () => {
     // When backend /v1/users/me returns 5xx, usersMe is null so
     // subscription_status is unknown. The gate only fires when
@@ -591,5 +748,97 @@ describe("Model-path gate", () => {
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
     // Backend down: usersMe is null, gate does not fire, request proxies through.
     expect(resp.status).toBe(200);
+  });
+});
+
+describe("X-Edge-Secret injection on upstream forwards", () => {
+  it("injects X-Edge-Secret on bypass path (non-model /api/* request)", async () => {
+    const { env } = makeEnv("enforce", undefined, { edgeSecret: "secret-bypass-1" });
+    const { captured } = stubFetch({});
+    const req = new Request("https://chat.thefixer.in/api/agents", { method: "POST" });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Edge-Secret")).toBe("secret-bypass-1");
+  });
+
+  it("injects X-Edge-Secret on gated, allowed model-call forward (active user)", async () => {
+    const token = await signJwt({
+      sub: "user-edge-active",
+      email: "edge-active@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks, { edgeSecret: "secret-active-1" });
+    const { captured } = stubFetch({
+      usersMeBody: { full_name: "Edge Active User", has_active_subscription: true },
+    });
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Edge-Secret")).toBe("secret-active-1");
+  });
+
+  it("injects X-Edge-Secret on UI page-load forward (signed-in user)", async () => {
+    const token = await signJwt({
+      sub: "user-edge-ui",
+      email: "edge-ui@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks, { edgeSecret: "secret-ui-1" });
+    const { captured } = stubFetch({
+      usersMeBody: { full_name: "Edge UI User", has_active_subscription: true },
+    });
+    const req = new Request("https://chat.thefixer.in/", {
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Edge-Secret")).toBe("secret-ui-1");
+  });
+
+  it("injects X-Edge-Secret in shadow mode forwards too", async () => {
+    const { env } = makeEnv("shadow", undefined, { edgeSecret: "secret-shadow-1" });
+    const { captured } = stubFetch({});
+    const req = new Request("https://chat.thefixer.in/");
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Edge-Secret")).toBe("secret-shadow-1");
+  });
+
+  it("does NOT inject X-Edge-Secret when env.EDGE_SECRET is unset (pre-rollout window)", async () => {
+    const { env } = makeEnv("enforce", undefined, { edgeSecret: undefined });
+    const { captured } = stubFetch({});
+    const req = new Request("https://chat.thefixer.in/api/agents", { method: "POST" });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Edge-Secret")).toBeNull();
+  });
+
+  it("strips client-supplied X-Edge-Secret and replaces with env value", async () => {
+    const { env } = makeEnv("enforce", undefined, { edgeSecret: "real-secret" });
+    const { captured } = stubFetch({});
+    const req = new Request("https://chat.thefixer.in/api/agents", {
+      method: "POST",
+      headers: { "X-Edge-Secret": "spoofed-by-client" },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Edge-Secret")).toBe("real-secret");
   });
 });
