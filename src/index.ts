@@ -17,7 +17,13 @@ const COOKIE_NAME = "sb-access-token";
  * to keep the billing gate complete.
  */
 export const MODEL_API_PATH_PREFIXES: readonly string[] = [
-  // Chat completions (multiple aliases across OpenAI / OWUI / LibreChat).
+  // LibreChat 0.8.5 agents send paths (the live wire today; modelSpecs all
+  // resolve to `endpoint: "agents"`, the client POSTs to /api/agents/chat).
+  "/api/agents/chat",
+  "/api/agents/v1/chat/completions",
+  "/api/agents/v1/responses",
+  "/api/agents/responses",
+  // Chat completions aliases (OpenAI / OWUI / generic LibreChat shapes).
   "/api/chat/completions",
   "/api/v1/chat/completions",
   "/openai/chat/completions",
