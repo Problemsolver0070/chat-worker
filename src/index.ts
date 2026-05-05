@@ -230,6 +230,37 @@ export default {
           { status: 503, headers: { "content-type": "application/json" } },
         );
       }
+      // F41: edge rate limit on model-API paths only. Keyed by JWT sub so
+      // each signed-in account gets its own counter. UI page loads, agent
+      // management, and other non-model /api/* paths are NOT rate limited
+      // (they cost us nothing). 60 req/60s is generous for normal chat
+      // usage but cuts off automated abuse. The binding is optional in
+      // the type so older test setups without it still work; in
+      // production wrangler.toml provisions RATE_LIMITER on every deploy.
+      if (
+        isModelApiCall(req) &&
+        env.RATE_LIMITER &&
+        validatedClaims?.sub
+      ) {
+        const result = await env.RATE_LIMITER.limit({ key: validatedClaims.sub });
+        if (!result.success) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                type: "rate_limited",
+                message: "Too many requests. Try again in a minute.",
+              },
+            }),
+            {
+              status: 429,
+              headers: {
+                "content-type": "application/json",
+                "Retry-After": "60",
+              },
+            },
+          );
+        }
+      }
       const fwd = validatedClaims ? withTrustedHeaders(req, validatedClaims, usersMe) : req;
       return fetch(withEdgeSecret(fwd, env));
     }
