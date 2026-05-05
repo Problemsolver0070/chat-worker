@@ -11,7 +11,7 @@
  * falls back to the existing email-only header set so an outage on
  * `/v1/users/me` does not break chat access.
  */
-export type SubscriptionStatus = "active" | "trial" | "demo" | "expired";
+export type SubscriptionStatus = "active" | "expired";
 
 export interface UsersMeResult {
   name: string | null;
@@ -21,34 +21,19 @@ export interface UsersMeResult {
 interface UsersMeResponse {
   full_name?: string | null;
   has_active_subscription?: boolean;
-  in_demo_window?: boolean;
-  in_trial_window?: boolean;
-  in_comp_window?: boolean;
 }
 
 const CACHE_KEY_PREFIX = "users_me:";
 const DEFAULT_TTL_SECONDS = 300;
 
 /**
- * Derive the public subscription_status from the computed booleans the
- * backend returns. Order matters: `active` (paying user via PayPal OR via
- * code redemption / hosted button) takes precedence over a still-open
- * trial / demo window because a renewed subscription should not appear
- * as "trial" once the first paid charge lands. `expired` is the terminal
- * state and the only one the worker uses to deny chat access.
- *
- * `in_comp_window` is folded into `active` because the product treats
- * code redemption and hosted-button payments as the paid tier. A
- * code-redeemed user must reach chat exactly like a PayPal subscriber
- * does, even though `has_active_subscription` (which the User schema
- * derives strictly from `paypal_sub_status`) is false for them.
+ * Derive the public subscription_status from the backend response.
+ * The backend now folds admin_chat_grant, PayPal sub status, and
+ * comp_until into a single `has_active_subscription` boolean. The
+ * worker just maps it to "active" or "expired".
  */
 export function deriveSubscriptionStatus(body: UsersMeResponse): SubscriptionStatus {
-  if (body.has_active_subscription) return "active";
-  if (body.in_comp_window) return "active";
-  if (body.in_trial_window) return "trial";
-  if (body.in_demo_window) return "demo";
-  return "expired";
+  return body.has_active_subscription ? "active" : "expired";
 }
 
 /**

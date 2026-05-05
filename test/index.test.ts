@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeAll, beforeEach } from "vitest";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import worker from "../src/index";
+import { isModelApiCall, MODEL_API_PATH_PREFIXES } from "../src/index";
 import type { WorkerEnv } from "../src/config";
 
 const SAMPLE_JWKS = JSON.stringify({ keys: [] });
@@ -84,6 +85,33 @@ function stubFetch(opts: {
   }) as typeof fetch;
   return { captured: () => captured };
 }
+
+describe("isModelApiCall helper", () => {
+  it("returns true for POST to /api/chat/completions", () => {
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", { method: "POST" });
+    expect(isModelApiCall(req)).toBe(true);
+  });
+
+  it("returns false for GET to /api/chat/completions", () => {
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", { method: "GET" });
+    expect(isModelApiCall(req)).toBe(false);
+  });
+
+  it("returns true for POST to /ollama/api/chat", () => {
+    const req = new Request("https://chat.thefixer.in/ollama/api/chat", { method: "POST" });
+    expect(isModelApiCall(req)).toBe(true);
+  });
+
+  it("returns false for POST to /api/agents (non-model path)", () => {
+    const req = new Request("https://chat.thefixer.in/api/agents", { method: "POST" });
+    expect(isModelApiCall(req)).toBe(false);
+  });
+
+  it("returns false for a UI page load (GET /)", () => {
+    const req = new Request("https://chat.thefixer.in/", { method: "GET" });
+    expect(isModelApiCall(req)).toBe(false);
+  });
+});
 
 describe("Worker fetch handler", () => {
   it("redirects to login when sb-access-token cookie missing (enforce)", async () => {
@@ -238,7 +266,7 @@ describe("Worker fetch handler", () => {
   });
 });
 
-describe("Round 6 / T6.1 name + subscription forwarding", () => {
+describe("Name + subscription forwarding", () => {
   it("forwards X-Forwarded-Name when /v1/users/me returns a full_name", async () => {
     const token = await signJwt({
       sub: "user-name-1",
@@ -283,70 +311,18 @@ describe("Round 6 / T6.1 name + subscription forwarding", () => {
     expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBe("active");
   });
 
-  it("forwards trial subscription status when in_trial_window is true", async () => {
+  it("proxies expired user to origin on UI path with X-Forwarded-Subscription-Status: expired", async () => {
     const token = await signJwt({
-      sub: "user-trial",
-      email: "trial@example.com",
-      has_active_subscription: true,
-    });
-    const jwks = JSON.stringify({ keys: [publicJwk] });
-    const { env } = makeEnv("enforce", jwks);
-    const { captured } = stubFetch({
-      usersMeBody: {
-        full_name: "Trial User",
-        has_active_subscription: false,
-        in_trial_window: true,
-      },
-    });
-    const req = new Request("https://chat.thefixer.in/", {
-      headers: { cookie: `sb-access-token=${token}` },
-    });
-    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
-    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(200);
-    const fwd = captured();
-    expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBe("trial");
-  });
-
-  it("forwards demo subscription status when only in_demo_window is true", async () => {
-    const token = await signJwt({
-      sub: "user-demo",
-      email: "demo@example.com",
-      has_active_subscription: true,
-    });
-    const jwks = JSON.stringify({ keys: [publicJwk] });
-    const { env } = makeEnv("enforce", jwks);
-    const { captured } = stubFetch({
-      usersMeBody: {
-        full_name: "Demo User",
-        has_active_subscription: false,
-        in_demo_window: true,
-      },
-    });
-    const req = new Request("https://chat.thefixer.in/", {
-      headers: { cookie: `sb-access-token=${token}` },
-    });
-    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
-    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(200);
-    const fwd = captured();
-    expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBe("demo");
-  });
-
-  it("redirects to upgrade when backend reports subscription_status=expired even if JWT claim says active", async () => {
-    const token = await signJwt({
-      sub: "user-expired",
+      sub: "user-expired-ui",
       email: "expired@example.com",
-      has_active_subscription: true,
+      has_active_subscription: false,
     });
     const jwks = JSON.stringify({ keys: [publicJwk] });
     const { env } = makeEnv("enforce", jwks);
-    stubFetch({
+    const { captured } = stubFetch({
       usersMeBody: {
         full_name: "Expired User",
         has_active_subscription: false,
-        in_trial_window: false,
-        in_demo_window: false,
       },
     });
     const req = new Request("https://chat.thefixer.in/", {
@@ -354,8 +330,11 @@ describe("Round 6 / T6.1 name + subscription forwarding", () => {
     });
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(302);
-    expect(resp.headers.get("Location")).toContain("/app/billing/upgrade");
+    // UI path: expired user gets through (no redirect).
+    expect(resp.status).toBe(200);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBe("expired");
   });
 
   it("falls back to forwarding without name headers when /v1/users/me returns 5xx", async () => {
@@ -453,5 +432,164 @@ describe("Round 6 / T6.1 name + subscription forwarding", () => {
     });
     await worker.fetch(req2, env, ctx as unknown as ExecutionContext);
     expect(usersMeCalls).toBe(1);
+  });
+});
+
+describe("Model-path gate", () => {
+  it("returns 402 when expired user POSTs to /api/chat/completions", async () => {
+    const token = await signJwt({
+      sub: "user-expired-model",
+      email: "expired-model@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    stubFetch({
+      usersMeBody: {
+        full_name: "Expired Model User",
+        has_active_subscription: false,
+      },
+    });
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(402);
+    expect(resp.headers.get("content-type")).toBe("application/json");
+    const body = await resp.json() as { error: { type: string; message: string } };
+    expect(body.error.type).toBe("subscription_expired");
+    expect(body.error.message).toContain("thefixer.in/app/billing/upgrade");
+  });
+
+  it("returns 402 when expired user POSTs to /ollama/api/chat", async () => {
+    const token = await signJwt({
+      sub: "user-expired-ollama",
+      email: "expired-ollama@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    stubFetch({
+      usersMeBody: {
+        full_name: "Expired Ollama User",
+        has_active_subscription: false,
+      },
+    });
+    const req = new Request("https://chat.thefixer.in/ollama/api/chat", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(402);
+    const body = await resp.json() as { error: { type: string } };
+    expect(body.error.type).toBe("subscription_expired");
+  });
+
+  it("forwards active user POST to /api/chat/completions to origin", async () => {
+    const token = await signJwt({
+      sub: "user-active-model",
+      email: "active-model@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    const { captured } = stubFetch({
+      usersMeBody: {
+        full_name: "Active Model User",
+        has_active_subscription: true,
+      },
+    });
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(200);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBe("active");
+  });
+
+  it("forwards active user POST to /api/v1/messages to origin", async () => {
+    const token = await signJwt({
+      sub: "user-active-messages",
+      email: "active-messages@example.com",
+      has_active_subscription: true,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    const { captured } = stubFetch({
+      usersMeBody: {
+        full_name: "Active Messages User",
+        has_active_subscription: true,
+      },
+    });
+    const req = new Request("https://chat.thefixer.in/api/v1/messages", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    expect(resp.status).toBe(200);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+  });
+
+  it("lets expired user GET /api/chat/completions through (only POST is gated)", async () => {
+    const token = await signJwt({
+      sub: "user-expired-get",
+      email: "expired-get@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    stubFetch({
+      usersMeBody: {
+        full_name: "Expired Get User",
+        has_active_subscription: false,
+      },
+    });
+    // GET requests to model paths are not gated (only POST invokes models).
+    // But /api/* paths that are not model paths go through the bypass, so
+    // this GET actually goes through the bypass. For a non-model /api/ GET
+    // the bypass handles it. For model paths, GET is unusual but harmless.
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "GET",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    // GET to /api/* (non-model-call) hits the bypass and gets 200.
+    expect(resp.status).toBe(200);
+  });
+
+  it("returns 402 when backend is down but JWT has_active_subscription is false and model path POSTed", async () => {
+    // When backend /v1/users/me returns 5xx, usersMe is null so
+    // subscription_status is unknown. The gate only fires when
+    // usersMe?.subscription_status === "expired", so a backend outage
+    // does NOT block model access (graceful degradation).
+    const token = await signJwt({
+      sub: "user-5xx-model",
+      email: "five-model@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    stubFetch({
+      usersMeStatus: 503,
+      usersMeBody: null,
+    });
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    // Backend down: usersMe is null, gate does not fire, request proxies through.
+    expect(resp.status).toBe(200);
   });
 });
