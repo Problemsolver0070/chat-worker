@@ -40,6 +40,20 @@ describe("fetchJwks", () => {
     );
   });
 
+  it("bounds the stale-cache fallback to 7 days (F50)", async () => {
+    // Security fix F50: when the worker successfully fetches fresh JWKS
+    // it must also write the stale-cache entry with a 7d TTL so a key
+    // that is rotated upstream cannot live in stale-cache forever.
+    (kv.get as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    await fetchJwks("https://example/.well-known/jwks.json", kv);
+    const SEVEN_DAYS = 7 * 24 * 60 * 60;
+    expect(kv.put).toHaveBeenCalledWith(
+      "jwks_stale",
+      JSON.stringify(SAMPLE_JWKS),
+      { expirationTtl: SEVEN_DAYS },
+    );
+  });
+
   it("returns stale cache on fetch failure", async () => {
     (kv.get as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(null)
