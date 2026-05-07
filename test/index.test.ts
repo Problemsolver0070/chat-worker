@@ -534,9 +534,20 @@ describe("Model-path gate", () => {
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
     expect(resp.status).toBe(402);
     expect(resp.headers.get("content-type")).toBe("application/json");
-    const body = await resp.json() as { error: { type: string; message: string } };
+    const body = await resp.json() as {
+      error: {
+        type: string;
+        title: string;
+        message: string;
+        action: string;
+        upgrade_url: string;
+      };
+    };
     expect(body.error.type).toBe("subscription_expired");
-    expect(body.error.message).toContain("thefixer.in/app/billing/upgrade");
+    expect(body.error.title).toBe("Plan required");
+    expect(body.error.message).toContain("model calls are paused");
+    expect(body.error.action).toContain("free demo");
+    expect(body.error.upgrade_url).toBe("https://thefixer.in/app/billing/upgrade");
   });
 
   it("returns 402 when expired user POSTs to /ollama/api/chat", async () => {
@@ -771,9 +782,13 @@ describe("Model-path gate", () => {
     // Backend down on a model-API path: fail-CLOSED with 503.
     expect(resp.status).toBe(503);
     expect(resp.headers.get("content-type")).toBe("application/json");
-    const body = await resp.json() as { error: { type: string; message: string } };
+    const body = await resp.json() as {
+      error: { type: string; title: string; message: string; action: string };
+    };
     expect(body.error.type).toBe("backend_unavailable");
-    expect(body.error.message).toContain("temporarily unverifiable");
+    expect(body.error.title).toBe("Chat temporarily unavailable");
+    expect(body.error.message).toContain("could not verify");
+    expect(body.error.action).toContain("Try again");
     // Origin must NOT have been forwarded to (only the failed /v1/users/me
     // call was made, no upstream LibreChat request).
     expect(captured()).toBeNull();
@@ -922,8 +937,12 @@ describe("Edge rate limit on model-API paths (F41)", () => {
     expect(resp.status).toBe(429);
     expect(resp.headers.get("Retry-After")).toBe("60");
     expect(resp.headers.get("content-type")).toBe("application/json");
-    const body = (await resp.json()) as { error: { type: string } };
+    const body = (await resp.json()) as {
+      error: { type: string; title: string; retry_after_seconds: number };
+    };
     expect(body.error.type).toBe("rate_limited");
+    expect(body.error.title).toBe("Too many chat requests");
+    expect(body.error.retry_after_seconds).toBe(60);
     // The limiter must have been called with the JWT sub as the key.
     expect(denied.limit).toHaveBeenCalledWith({ key: "user-rl-over" });
   });
