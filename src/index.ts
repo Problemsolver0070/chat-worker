@@ -113,6 +113,30 @@ function withEdgeSecret(req: Request, env: WorkerEnv): Request {
   return new Request(req, { headers });
 }
 
+function jsonError(
+  status: number,
+  error: {
+    type: string;
+    title: string;
+    message: string;
+    action?: string;
+    upgrade_url?: string;
+    retry_after_seconds?: number;
+  },
+  headers?: Record<string, string>,
+): Response {
+  return new Response(
+    JSON.stringify({ error }),
+    {
+      status,
+      headers: {
+        "content-type": "application/json",
+        ...headers,
+      },
+    },
+  );
+}
+
 export default {
   async fetch(originalReq: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> {
     // Strip client-supplied trusted-header values BEFORE any other logic so
@@ -201,15 +225,13 @@ export default {
       // expired subscriptions can browse the chat UI but cannot invoke
       // any model. Return 402 with a JSON body the client can render.
       if (isModelApiCall(req) && usersMe?.subscription_status === "expired") {
-        return new Response(
-          JSON.stringify({
-            error: {
-              type: "subscription_expired",
-              message: "Subscribe at thefixer.in/app/billing/upgrade to use models.",
-            },
-          }),
-          { status: 402, headers: { "content-type": "application/json" } },
-        );
+        return jsonError(402, {
+          type: "subscription_expired",
+          title: "Plan required",
+          message: "Your The Fixer plan is not active, so chat model calls are paused.",
+          action: "Open billing to choose a plan or ask Support for a free demo before you pay.",
+          upgrade_url: env.UPGRADE_REDIRECT,
+        });
       }
       // Fail-CLOSED on backend outage for model-completion paths only.
       // If usersMe is null (cache miss + backend 5xx / network error) we
@@ -220,15 +242,12 @@ export default {
       // users do not lose chat browsing during a transient outage.
       // Security fix F12 from Wave 2 audit.
       if (isModelApiCall(req) && usersMe === null) {
-        return new Response(
-          JSON.stringify({
-            error: {
-              type: "backend_unavailable",
-              message: "Subscription state is temporarily unverifiable. Try again in a moment.",
-            },
-          }),
-          { status: 503, headers: { "content-type": "application/json" } },
-        );
+        return jsonError(503, {
+          type: "backend_unavailable",
+          title: "Chat temporarily unavailable",
+          message: "We could not verify your subscription state, so model calls are paused for safety.",
+          action: "Try again in a moment. If this keeps happening, open Support from the dashboard.",
+        });
       }
       // F41: edge rate limit on model-API paths only. Keyed by JWT sub so
       // each signed-in account gets its own counter. UI page loads, agent
@@ -244,20 +263,16 @@ export default {
       ) {
         const result = await env.RATE_LIMITER.limit({ key: validatedClaims.sub });
         if (!result.success) {
-          return new Response(
-            JSON.stringify({
-              error: {
-                type: "rate_limited",
-                message: "Too many requests. Try again in a minute.",
-              },
-            }),
+          return jsonError(
+            429,
             {
-              status: 429,
-              headers: {
-                "content-type": "application/json",
-                "Retry-After": "60",
-              },
+              type: "rate_limited",
+              title: "Too many chat requests",
+              message: "You have sent too many model requests in a short time.",
+              action: "Wait a minute, then try again.",
+              retry_after_seconds: 60,
             },
+            { "Retry-After": "60" },
           );
         }
       }
