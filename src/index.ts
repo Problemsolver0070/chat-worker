@@ -221,18 +221,16 @@ export default {
     }
 
     if (signedIn) {
-      // Model-completion paths: gate on active subscription. Users with
-      // expired subscriptions can browse the chat UI but cannot invoke
-      // any model. Return 402 with a JSON body the client can render.
-      if (isModelApiCall(req) && usersMe?.subscription_status === "expired") {
-        return jsonError(402, {
-          type: "subscription_expired",
-          title: "Plan required",
-          message: "Your The Fixer plan is not active, so chat model calls are paused.",
-          action: "Open billing to choose a plan or ask Support for a free demo before you pay.",
-          upgrade_url: env.UPGRADE_REDIRECT,
-        });
-      }
+      // Friction-killer wave (2026-05-07): the worker no longer 402s
+      // non-subscribed users on the model path. Every signed-in user is
+      // forwarded to LibreChat, where freeMessageCap.js enforces the
+      // 3-free-messages cap by counting messages live in chat-mongodb.
+      // The worker still validates the JWT (anonymous traffic is still
+      // 401-redirected to login below) and still forwards
+      // X-Forwarded-Subscription-Status so LibreChat can short-circuit
+      // the cap check for active subscribers. See
+      // llmfixer-api/docs/superpowers/specs/2026-05-07-friction-killer-wave.md.
+      //
       // Fail-CLOSED on backend outage for model-completion paths only.
       // If usersMe is null (cache miss + backend 5xx / network error) we
       // cannot verify the subscription state, so we must not let paid

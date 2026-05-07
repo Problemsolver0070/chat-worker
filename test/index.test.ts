@@ -512,7 +512,12 @@ describe("Name + subscription forwarding", () => {
 });
 
 describe("Model-path gate", () => {
-  it("returns 402 when expired user POSTs to /api/chat/completions", async () => {
+  it("forwards expired user POST to /api/chat/completions to origin (no 402, friction-killer)", async () => {
+    // Friction-killer wave (2026-05-07): the worker no longer 402s a
+    // non-subscribed user on the model path. Forwarding goes through to
+    // LibreChat, where freeMessageCap.js enforces the 3-message cap.
+    // The forwarded X-Forwarded-Subscription-Status header is "expired"
+    // so LibreChat knows to apply the cap.
     const token = await signJwt({
       sub: "user-expired-model",
       email: "expired-model@example.com",
@@ -520,7 +525,7 @@ describe("Model-path gate", () => {
     });
     const jwks = JSON.stringify({ keys: [publicJwk] });
     const { env } = makeEnv("enforce", jwks);
-    stubFetch({
+    const { captured } = stubFetch({
       usersMeBody: {
         full_name: "Expired Model User",
         has_active_subscription: false,
@@ -532,25 +537,14 @@ describe("Model-path gate", () => {
     });
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(402);
-    expect(resp.headers.get("content-type")).toBe("application/json");
-    const body = await resp.json() as {
-      error: {
-        type: string;
-        title: string;
-        message: string;
-        action: string;
-        upgrade_url: string;
-      };
-    };
-    expect(body.error.type).toBe("subscription_expired");
-    expect(body.error.title).toBe("Plan required");
-    expect(body.error.message).toContain("model calls are paused");
-    expect(body.error.action).toContain("free demo");
-    expect(body.error.upgrade_url).toBe("https://thefixer.in/app/billing/upgrade");
+    expect(resp.status).toBe(200);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Forwarded-Email")).toBe("expired-model@example.com");
+    expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBe("expired");
   });
 
-  it("returns 402 when expired user POSTs to /ollama/api/chat", async () => {
+  it("forwards expired user POST to /ollama/api/chat to origin (no 402, friction-killer)", async () => {
     const token = await signJwt({
       sub: "user-expired-ollama",
       email: "expired-ollama@example.com",
@@ -558,7 +552,7 @@ describe("Model-path gate", () => {
     });
     const jwks = JSON.stringify({ keys: [publicJwk] });
     const { env } = makeEnv("enforce", jwks);
-    stubFetch({
+    const { captured } = stubFetch({
       usersMeBody: {
         full_name: "Expired Ollama User",
         has_active_subscription: false,
@@ -570,9 +564,10 @@ describe("Model-path gate", () => {
     });
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(402);
-    const body = await resp.json() as { error: { type: string } };
-    expect(body.error.type).toBe("subscription_expired");
+    expect(resp.status).toBe(200);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBe("expired");
   });
 
   it("forwards active user POST to /api/chat/completions to origin", async () => {
@@ -654,7 +649,7 @@ describe("Model-path gate", () => {
     expect(resp.status).toBe(200);
   });
 
-  it("returns 402 when expired user POSTs to tool-call /api/agents/tools/T/call", async () => {
+  it("forwards expired user POST to tool-call /api/agents/tools/T/call (no 402, friction-killer)", async () => {
     const token = await signJwt({
       sub: "user-expired-tool",
       email: "expired-tool@example.com",
@@ -662,7 +657,7 @@ describe("Model-path gate", () => {
     });
     const jwks = JSON.stringify({ keys: [publicJwk] });
     const { env } = makeEnv("enforce", jwks);
-    stubFetch({
+    const { captured } = stubFetch({
       usersMeBody: { full_name: "Expired Tool User", has_active_subscription: false },
     });
     const req = new Request(
@@ -671,12 +666,11 @@ describe("Model-path gate", () => {
     );
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(402);
-    const body = await resp.json() as { error: { type: string } };
-    expect(body.error.type).toBe("subscription_expired");
+    expect(resp.status).toBe(200);
+    expect(captured()).not.toBeNull();
   });
 
-  it("returns 402 when expired user GETs SSE resume /api/agents/chat/stream/:id", async () => {
+  it("forwards expired user GET on SSE resume /api/agents/chat/stream/:id (no 402, friction-killer)", async () => {
     const token = await signJwt({
       sub: "user-expired-sse",
       email: "expired-sse@example.com",
@@ -684,7 +678,7 @@ describe("Model-path gate", () => {
     });
     const jwks = JSON.stringify({ keys: [publicJwk] });
     const { env } = makeEnv("enforce", jwks);
-    stubFetch({
+    const { captured } = stubFetch({
       usersMeBody: { full_name: "Expired SSE User", has_active_subscription: false },
     });
     const req = new Request("https://chat.thefixer.in/api/agents/chat/stream/abc123", {
@@ -693,10 +687,11 @@ describe("Model-path gate", () => {
     });
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(402);
+    expect(resp.status).toBe(200);
+    expect(captured()).not.toBeNull();
   });
 
-  it("returns 402 when expired user PUTs /api/messages/:conv/:msg (regenerate)", async () => {
+  it("forwards expired user PUT /api/messages/:conv/:msg regenerate (no 402, friction-killer)", async () => {
     const token = await signJwt({
       sub: "user-expired-regen",
       email: "expired-regen@example.com",
@@ -704,7 +699,7 @@ describe("Model-path gate", () => {
     });
     const jwks = JSON.stringify({ keys: [publicJwk] });
     const { env } = makeEnv("enforce", jwks);
-    stubFetch({
+    const { captured } = stubFetch({
       usersMeBody: { full_name: "Expired Regen User", has_active_subscription: false },
     });
     const req = new Request("https://chat.thefixer.in/api/messages/conv1/msg1", {
@@ -713,10 +708,11 @@ describe("Model-path gate", () => {
     });
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(402);
+    expect(resp.status).toBe(200);
+    expect(captured()).not.toBeNull();
   });
 
-  it("returns 402 when expired user POSTs /api/files/speech/stt", async () => {
+  it("forwards expired user POST /api/files/speech/stt (no 402, friction-killer)", async () => {
     const token = await signJwt({
       sub: "user-expired-stt",
       email: "expired-stt@example.com",
@@ -724,7 +720,7 @@ describe("Model-path gate", () => {
     });
     const jwks = JSON.stringify({ keys: [publicJwk] });
     const { env } = makeEnv("enforce", jwks);
-    stubFetch({
+    const { captured } = stubFetch({
       usersMeBody: { full_name: "Expired STT User", has_active_subscription: false },
     });
     const req = new Request("https://chat.thefixer.in/api/files/speech/stt", {
@@ -733,10 +729,11 @@ describe("Model-path gate", () => {
     });
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(402);
+    expect(resp.status).toBe(200);
+    expect(captured()).not.toBeNull();
   });
 
-  it("returns 402 when expired user POSTs /api/files/speech/tts", async () => {
+  it("forwards expired user POST /api/files/speech/tts (no 402, friction-killer)", async () => {
     const token = await signJwt({
       sub: "user-expired-tts",
       email: "expired-tts@example.com",
@@ -744,7 +741,7 @@ describe("Model-path gate", () => {
     });
     const jwks = JSON.stringify({ keys: [publicJwk] });
     const { env } = makeEnv("enforce", jwks);
-    stubFetch({
+    const { captured } = stubFetch({
       usersMeBody: { full_name: "Expired TTS User", has_active_subscription: false },
     });
     const req = new Request("https://chat.thefixer.in/api/files/speech/tts", {
@@ -753,7 +750,8 @@ describe("Model-path gate", () => {
     });
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
     const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
-    expect(resp.status).toBe(402);
+    expect(resp.status).toBe(200);
+    expect(captured()).not.toBeNull();
   });
 
   it("returns 503 (fail-closed) when backend /v1/users/me is 5xx and model path POSTed (F12)", async () => {
@@ -820,6 +818,75 @@ describe("Model-path gate", () => {
     expect(fwd).not.toBeNull();
     expect(fwd!.headers.get("X-Forwarded-Email")).toBe("five-ui@example.com");
     expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBeNull();
+  });
+});
+
+describe("Friction-killer wave: drop subscription-status 402 on model path", () => {
+  // Spec: llmfixer-api/docs/superpowers/specs/2026-05-07-friction-killer-wave.md
+  // The worker no longer 402s non-subscribed users on the model path.
+  // The 3-message cap is enforced inside LibreChat (freeMessageCap.js)
+  // by counting messages in chat-mongodb. The worker must still:
+  //  - 401-block (302 to login) anonymous traffic
+  //  - forward X-Forwarded-Subscription-Status so LibreChat can skip the cap
+
+  it("forwards non-subscribed JWT on model path with status=expired (NOT 402'd)", async () => {
+    const token = await signJwt({
+      sub: "user-friction-fwd",
+      email: "friction-fwd@example.com",
+      has_active_subscription: false,
+    });
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    const { captured } = stubFetch({
+      usersMeBody: { full_name: "Friction Fwd User", has_active_subscription: false },
+    });
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+      headers: { cookie: `sb-access-token=${token}` },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    // The whole point of friction-killer R1: no 402 here.
+    expect(resp.status).not.toBe(402);
+    expect(resp.status).toBe(200);
+    const fwd = captured();
+    expect(fwd).not.toBeNull();
+    // LibreChat reads this header to decide whether to apply the cap.
+    expect(fwd!.headers.get("X-Forwarded-Subscription-Status")).toBe("expired");
+    expect(fwd!.headers.get("X-Forwarded-Email")).toBe("friction-fwd@example.com");
+    expect(fwd!.headers.get("X-Forwarded-User")).toBe("user-friction-fwd");
+  });
+
+  it("blocks anonymous request to model path (no JWT cookie -> 302 redirect, not forwarded)", async () => {
+    const { env } = makeEnv("enforce");
+    const { captured } = stubFetch({});
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    // No JWT means anonymous, which still must be blocked. The worker
+    // redirects to login (browser) rather than returning a bare 401, but
+    // either way the request never reaches origin.
+    expect(resp.status).toBe(302);
+    expect(resp.headers.get("Location")).toContain("https://thefixer.in/login");
+    expect(captured()).toBeNull();
+  });
+
+  it("blocks model-path request with invalid JWT (302 redirect, not forwarded)", async () => {
+    const jwks = JSON.stringify({ keys: [publicJwk] });
+    const { env } = makeEnv("enforce", jwks);
+    const { captured } = stubFetch({});
+    const req = new Request("https://chat.thefixer.in/api/chat/completions", {
+      method: "POST",
+      headers: { cookie: "sb-access-token=not.a.valid.jwt" },
+    });
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    const resp = await worker.fetch(req, env, ctx as unknown as ExecutionContext);
+    // Invalid JWT cannot reach origin: must be redirected to login.
+    expect(resp.status).toBe(302);
+    expect(resp.headers.get("Location")).toContain("https://thefixer.in/login");
+    expect(captured()).toBeNull();
   });
 });
 
