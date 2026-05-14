@@ -1,7 +1,8 @@
 # chat-worker
 
-Cloudflare Worker that gates `chat.thefixer.in` traffic by reading the
-Supabase JWT cookie and checking the `has_active_subscription` claim.
+Cloudflare Worker in front of `chat.thefixer.in`. It reads the Supabase
+JWT cookie and checks `has_active_subscription` before forwarding to
+origin.
 
 ## Local dev
 
@@ -26,10 +27,11 @@ CI deploys via `wrangler deploy`. See `.github/workflows/deploy.yml`.
 ## Architecture
 
 `src/index.ts` is the fetch handler. It validates the `sb-access-token`
-cookie against Supabase JWKS (cached in `JWKS_CACHE` KV namespace, 24h TTL),
-reads the `has_active_subscription` claim, and either forwards to the origin
-(via Cloudflare Tunnel) or redirects.
+cookie against Supabase JWKS (cached in the `JWKS_CACHE` KV namespace,
+24h TTL), reads the `has_active_subscription` claim, and either forwards
+to the origin via Cloudflare Tunnel or redirects.
 
-In `WORKER_MODE=shadow`, the Worker logs the gating decision but always
-forwards to origin. In `WORKER_MODE=enforce`, it actually redirects unpaid
-or unauthenticated users.
+`WORKER_MODE=shadow` logs the gating decision but always forwards to
+origin. `WORKER_MODE=enforce` redirects unpaid or unauthenticated users.
+Shadow mode exists so config changes can be observed in production
+before they affect real users.
